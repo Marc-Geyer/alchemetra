@@ -1,0 +1,16 @@
+[project]
+name = "alchemetra"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "pyside6~=6.11.1"
+]
+
+[tool.uv.workspace]
+members = [
+"apps/desktop",
+"packages/core",
+"packages/widgets",
+"packages/graphics",
+"packages/theme"
+]
