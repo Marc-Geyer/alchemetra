@@ -1,16 +1,27 @@
 [project]
 name = "alchemetra"
 version = "0.1.0"
-requires-python = ">=3.14"
+description = "Plugin-based scientific data analysis and visualization platform"
+requires-python = ">=3.11"
 dependencies = [
-    "pyside6~=6.11.1"
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13",
+    "xarray>=2024.1",
+    "numpy",
+    "scipy",
+    "h5py",
+    "zarr",
 ]
 
-[tool.uv.workspace]
-members = [
-"apps/desktop",
-"packages/core",
-"packages/widgets",
-"packages/graphics",
-"packages/theme"
-]
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+alchemetra = "alchemetra.ui.app:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
