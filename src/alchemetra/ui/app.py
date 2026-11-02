@@ -13,8 +13,8 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from .context import UiContext
-from .main_window import MainWindow
+from alchemetra.ui.context import UiContext
+from alchemetra.ui.main_window import MainWindow
 
 
 def main(argv: list[str] | None = None) -> int:
