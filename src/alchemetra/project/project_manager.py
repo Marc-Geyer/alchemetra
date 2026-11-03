@@ -1,4 +1,4 @@
-"""Project persistence: saving/loading complete project files.
+"""Save/load a Project to/from a directory (JSON manifest + zarr arrays).
 
 A project file is a directory containing:
 
@@ -7,9 +7,8 @@ A project file is a directory containing:
 * a JSON manifest with the workflow template, annotations, provenance and
   project-level metadata
 
-This module sketches the on-disk layout. Concrete (de)serialisation of
-:class:`Dataset`/:class:`Artifact` objects to zarr groups is left as an
-extension point (:meth:`ProjectManager._write_artifact` /
+This module implements the on-disk layout together with the storage
+backend extension points (:meth:`ProjectManager._write_artifact` /
 :meth:`ProjectManager._read_artifact`) so storage backends can be swapped
 later (e.g. HDF5 via h5py) without touching the rest of the application.
 """
@@ -17,6 +16,7 @@ later (e.g. HDF5 via h5py) without touching the rest of the application.
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,25 +24,15 @@ from typing import Any
 import xarray as xr
 
 from ..annotations.base import AnnotationBase
-from ..annotations.peak import PeakAnnotation
-from ..annotations.roi import ROIAnnotation
-from ..annotations.separator import SeparatorAnnotation
 from ..data.artifact import Artifact
 from ..data.dataset import Dataset
 from ..provenance.tracker import ProvenanceTracker
+from ..plugins.base import PluginKind
+from ..plugins.registry import PluginRegistry
 from ..workflow.graph import WorkflowGraph
 from .project import Project
 
-#: Registry of built-in annotation classes by plugin_id, used for
-#: deserialisation. Once third-party annotation plugins are registered
-#: with :class:`~alchemetra.plugins.registry.PluginRegistry`, this should
-#: be replaced by a registry lookup
-#: (``PluginRegistry.get(PluginKind.ANNOTATION, plugin_id)``).
-_ANNOTATION_TYPES: dict[str, type[AnnotationBase]] = {
-    PeakAnnotation.plugin_id: PeakAnnotation,
-    ROIAnnotation.plugin_id: ROIAnnotation,
-    SeparatorAnnotation.plugin_id: SeparatorAnnotation,
-}
+MANIFEST_VERSION = 2
 
 PROJECT_METADATA_FILE = "project.json"
 DATA_DIR = "data"
@@ -53,64 +43,68 @@ class ProjectManager:
 
     @staticmethod
     def save(project: Project, path: Path | str) -> None:
-        path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-
-        data_dir = path / DATA_DIR
-        data_dir.mkdir(exist_ok=True)
+        root = Path(path)
+        data_dir = root / DATA_DIR
+        data_dir.mkdir(parents=True, exist_ok=True)
 
         raw_data_meta = {
             node_id: ProjectManager._write_artifact(artifact, data_dir)
             for node_id, artifact in project.raw_data.items()
         }
-        derived_meta = {
+        derived_data_meta = {
             artifact_id: ProjectManager._write_artifact(artifact, data_dir)
             for artifact_id, artifact in project.derived_data.items()
         }
 
-        manifest: dict[str, Any] = {
+        manifest = {
+            "version": MANIFEST_VERSION,
             "name": project.name,
             "raw_data": raw_data_meta,
-            "derived_data": derived_meta,
+            "derived_data": derived_data_meta,
             "workflow": project.workflow.to_template(),
             "annotations": [a.to_dict() for a in project.annotations],
             "results": project.results,
             "provenance": project.provenance.to_dict(),
         }
+        (root / PROJECT_METADATA_FILE).write_text(json.dumps(manifest, indent=2, default=str))
 
-        with open(path / PROJECT_METADATA_FILE, "w", encoding="utf-8") as fh:
-            json.dump(manifest, fh, indent=2, default=str)
+        # remove arrays of artifacts that are no longer part of the project
+        live_ids = {meta["id"] for meta in list(raw_data_meta.values()) + list(derived_data_meta.values())}
+        for stale in data_dir.glob("*.zarr"):
+            if stale.stem not in live_ids:
+                shutil.rmtree(stale, ignore_errors=True)
 
     @staticmethod
     def load(path: Path | str) -> Project:
-        path = Path(path)
-        with open(path / PROJECT_METADATA_FILE, "r", encoding="utf-8") as fh:
-            manifest = json.load(fh)
+        root = Path(path)
+        manifest = json.loads((root / PROJECT_METADATA_FILE).read_text())
+        data_dir = root / DATA_DIR
+        cache: dict[str, Artifact] = {}
 
-        data_dir = path / DATA_DIR
+        def artifact_for(meta: dict) -> Artifact:
+            if meta["id"] not in cache:
+                cache[meta["id"]] = ProjectManager._read_artifact(meta, data_dir)
+            return cache[meta["id"]]
 
         project = Project(name=manifest.get("name", "Untitled project"))
-
-        for node_id, meta in manifest.get("raw_data", {}).items():
-            project.raw_data[node_id] = ProjectManager._read_artifact(meta, data_dir)
-
-        for artifact_id, meta in manifest.get("derived_data", {}).items():
-            project.derived_data[artifact_id] = ProjectManager._read_artifact(
-                meta, data_dir
-            )
-
+        project.raw_data = {
+            nid: artifact_for(m) for nid, m in manifest.get("raw_data", {}).items()
+        }
+        project.derived_data = {
+            aid: artifact_for(m) for aid, m in manifest.get("derived_data", {}).items()
+        }
         project.workflow = WorkflowGraph.from_template(manifest["workflow"])
 
         for annotation_data in manifest.get("annotations", []):
-            annotation_cls = _ANNOTATION_TYPES.get(annotation_data["plugin_id"])
-            if annotation_cls is not None:
-                project.annotations.append(annotation_cls.from_dict(annotation_data))
+            annotation_cls = PluginRegistry.get(
+                PluginKind.ANNOTATION, annotation_data["plugin_id"]
+            )
+            project.annotations.append(annotation_cls.from_dict(annotation_data))
 
         project.results = manifest.get("results", {})
         project.provenance = ProvenanceTracker.from_dict(
             manifest.get("provenance", {"records": []})
         )
-
         return project
 
     # ------------------------------------------------------------------
@@ -121,13 +115,14 @@ class ProjectManager:
         """Persist one artifact's :class:`Dataset` to ``data_dir`` and
         return a small metadata dict referencing it.
 
-        TODO: write ``artifact.dataset.xr`` to a zarr group named after
-        ``artifact.id`` (e.g. via ``xr.Dataset.to_zarr``), alongside
-        ``artifact.dataset.axis_meta_dict()``.
+        The dataset is written as a zarr group named after the artifact id
+        (``<artifact.id>.zarr``), which can later be opened with
+        :meth:`xarray.Dataset.load_dataset` / ``xr.open_zarr``.
         """
 
         store_path = f"{artifact.id}.zarr"
-        # artifact.dataset.xr.to_zarr(data_dir / store_path, mode="w")
+        artifact.dataset.xr.to_zarr(str(data_dir / store_path), mode="w", consolidated=False)
+
         return {
             "id": artifact.id,
             "store": store_path,
@@ -136,6 +131,7 @@ class ProjectManager:
             "params_hash": artifact.params_hash,
             "created_at": artifact.created_at.isoformat(),
             "metadata": artifact.metadata,
+            "dataset_metadata": artifact.dataset.metadata,
             "axis_meta": artifact.dataset.axis_meta_dict(),
         }
 
@@ -143,21 +139,23 @@ class ProjectManager:
     def _read_artifact(meta: dict[str, Any], data_dir: Path) -> Artifact:
         """Inverse of :meth:`_write_artifact`.
 
-        TODO: load ``data_dir / meta['store']`` via ``xr.open_zarr`` and
-        wrap it with :meth:`Dataset.from_xarray` using
-        ``meta['axis_meta']``.
+        Loads the zarr group referenced by ``meta['id']`` and wraps it in a
+        :class:`Dataset` using the stored axis metadata.
         """
 
-        # xr_data = xr.open_zarr(data_dir / meta["store"])
-        xr_data = xr.Dataset()
-        dataset = Dataset.from_xarray(xr_data, axis_meta_dict=meta.get("axis_meta"))
-
-        return Artifact(
+        with xr.open_zarr(str(data_dir / f"{meta['id']}.zarr"), consolidated=False) as lazy:
+            loaded = lazy.load()
+        dataset = Dataset.from_xarray(
+            loaded, axis_meta_dict=meta.get("axis_meta"), metadata=meta.get("dataset_metadata")
+        )
+        artifact = Artifact(
             dataset=dataset,
             id=meta["id"],
             produced_by=meta.get("produced_by"),
             output_port=meta.get("output_port"),
             params_hash=meta.get("params_hash"),
-            created_at=datetime.fromisoformat(meta["created_at"]),
-            metadata=meta.get("metadata", {}),
+            metadata=dict(meta.get("metadata") or {}),
         )
+        if meta.get("created_at"):
+            artifact.created_at = datetime.fromisoformat(meta["created_at"])
+        return artifact

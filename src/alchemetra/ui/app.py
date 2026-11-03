@@ -1,11 +1,4 @@
-"""Application entry point.
-
-Run with::
-
-    python -m alchemetra.ui.app
-
-or via the ``alchemetra`` console script (see ``pyproject.toml``).
-"""
+"""Application entry point.  Run with: python -m alchemetra.ui.app"""
 
 from __future__ import annotations
 
@@ -21,10 +14,8 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("Alchemetra")
     app.setOrganizationName("Alchemetra")
-
     window = MainWindow(UiContext())
     window.show()
-
     return app.exec()
 
 

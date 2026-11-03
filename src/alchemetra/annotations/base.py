@@ -1,22 +1,42 @@
-"""Annotations: user-created markers on data (peaks, ROIs, separators, ...).
-
-Like processing nodes, annotation types are plugins. The base class fixes
-how an annotation refers to axes (via
-:class:`~alchemetra.data.dataset.AxisRole`, never a hardcoded dimension
-name) and how it is (de)serialised so it can live in a project file and
-be re-applied to any dataset with matching axis roles - including ones
-from a different domain.
-"""
+"""Base class for annotation plugins."""
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from abc import abstractmethod
-from dataclasses import asdict, dataclass, field
-from typing import Any, ClassVar
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
 
 from ..data.dataset import AxisRole, Dataset
 from ..plugins.base import PluginBase, PluginKind
+from ..plugins.registry import PluginRegistry
+
+_ENUMS = {"AxisRole": AxisRole}
+
+
+def _encode(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return {"__enum__": type(value).__name__, "name": value.name}
+    if isinstance(value, dict):
+        return {
+            (k.name if isinstance(k, Enum) else str(k)): _encode(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_encode(v) for v in value]
+    return value
+
+
+def _decode(value: Any) -> Any:
+    if isinstance(value, dict):
+        if "__enum__" in value:
+            return _ENUMS[value["__enum__"]][value["name"]]
+        return {k: _decode(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decode(v) for v in value]
+    return value
 
 
 @dataclass
@@ -29,16 +49,10 @@ class AnnotationBase(PluginBase):
     onto the dimension names of a concrete dataset.
     """
 
-    plugin_kind: ClassVar[PluginKind] = PluginKind.ANNOTATION
+    plugin_kind = PluginKind.ANNOTATION
 
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
-
-    #: Which artifact this annotation was created on - kept for display
-    #: purposes; :meth:`resolve` can be used against *any* compatible
-    #: dataset.
-    artifact_id: str | None = None
-
-    #: Free-form label/colour/etc. for the UI.
+    artifact_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @abstractmethod
@@ -49,6 +63,8 @@ class AnnotationBase(PluginBase):
         time-window ROI on a heatmap might return
         ``(AxisRole.SPECTRAL, AxisRole.TEMPORAL)``.
         """
+
+        raise NotImplementedError
 
     def resolve(self, dataset: Dataset) -> dict[AxisRole, str]:
         """Map this annotation's required roles onto dimension names of
@@ -70,20 +86,19 @@ class AnnotationBase(PluginBase):
             mapping[role] = axis
         return mapping
 
-    # ------------------------------------------------------------------
-    # Serialisation
-    # ------------------------------------------------------------------
+    # -- serialisation (generic: works for any dataclass-based annotation) --
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["plugin_id"] = self.plugin_id
-        return data
+        return {
+            "plugin_id": self.plugin_id,
+            "fields": {
+                f.name: _encode(getattr(self, f.name)) for f in dataclasses.fields(self)
+            },
+        }
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AnnotationBase":
-        data = dict(data)
-        data.pop("plugin_id", None)
-        return cls(**data)
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "AnnotationBase":
+        """Rebuild an annotation via the plugin registry (third-party
+        annotation plugins are supported automatically)."""
 
-    id: str = field(default_factory=lambda: str(uuid4()))
-
-    label: str = ""
+        plugin_cls = PluginRegistry.get(PluginKind.ANNOTATION, data["plugin_id"])
+        return plugin_cls(**_decode(data["fields"]))

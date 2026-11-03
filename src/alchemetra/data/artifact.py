@@ -56,4 +56,6 @@ class Artifact:
 
     @property
     def label(self) -> str:
+        """Human-readable label of this artifact (defaults to a short id)."""
+
         return self.metadata.get("label", self.id[:8])

@@ -17,6 +17,7 @@ class LineageRecord:
 
     #: input port name -> artifact id
     inputs: dict[str, str]
+
     #: output port name -> artifact id
     outputs: dict[str, str]
 

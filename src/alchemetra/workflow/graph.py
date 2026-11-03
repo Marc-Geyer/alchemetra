@@ -11,7 +11,7 @@ ready to be executed by
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from .edge import Edge
 
@@ -76,7 +76,7 @@ class WorkflowGraph:
     inspect or edit graph structure).
     """
 
-    TEMPLATE_VERSION = 1
+    TEMPLATE_VERSION: ClassVar[int] = 1
 
     def __init__(self) -> None:
         self.nodes: dict[str, NodeInstance] = {}
@@ -94,8 +94,10 @@ class WorkflowGraph:
     def remove_node(self, node_id: str) -> None:
         if node_id not in self.nodes:
             raise GraphError(f"Unknown node '{node_id}'")
+
         self.edges = [
-            e for e in self.edges
+            e
+            for e in self.edges
             if e.source_node != node_id and e.target_node != node_id
         ]
         del self.nodes[node_id]

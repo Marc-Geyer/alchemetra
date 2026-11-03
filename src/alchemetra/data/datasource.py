@@ -1,9 +1,10 @@
-"""Data sources: plugins responsible for getting raw data into a Dataset.
+"""Base class for data-source plugins.
 
 A data source is the entry point of (almost) every workflow graph - it
 has no inputs and produces one or more :class:`Artifact` instances.
+
 Concrete data sources (Raman .spc readers, generic CSV/Excel importers,
-electrochemistry exporters, ...) are shipped as default plugins but are
+electrochemical exporters, ...) are shipped as default plugins but are
 not special in any way - users can add their own.
 """
 
@@ -39,9 +40,12 @@ class DataSourcePlugin(PluginBase):
         the project.
         """
 
-    def supports(self, source: Path | str) -> bool:
+        ...
+
+    @classmethod
+    def supports(cls, source: Path | str) -> bool:
         """Default extension-based check; override for smarter sniffing
         (e.g. magic bytes, header inspection)."""
 
         suffix = Path(source).suffix.lstrip(".").lower()
-        return suffix in self.file_extensions
+        return suffix in cls.file_extensions

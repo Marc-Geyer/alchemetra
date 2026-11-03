@@ -1,4 +1,4 @@
-"""Data layer: a thin, semantically-tagged wrapper around xarray.Dataset.
+"""Semantically annotated dataset wrapper.
 
 Design principle (do not violate): *axis semantics live here, not in
 processing or visualisation code*. A processing node that needs "the
@@ -33,11 +33,11 @@ class AxisRole(Enum):
     SPECTRAL = auto()      # e.g. wavenumber, wavelength, m/z
     TEMPORAL = auto()       # acquisition time / elapsed time
     SPATIAL = auto()        # retention time, position, depth, ...
-    INTENSITY = auto()       # signal magnitude / counts / absorbance
-    POTENTIAL = auto()       # electrochemical potential
-    CURRENT = auto()         # electrochemical current
-    SAMPLE = auto()          # categorical sample / replicate identifier
-    CUSTOM = auto()          # domain-specific role, see AxisMeta.custom_role
+    INTENSITY = auto()      # signal magnitude / counts / absorbance
+    POTENTIAL = auto()      # electrochemical potential
+    CURRENT = auto()        # electrochemical current
+    SAMPLE = auto()         # categorical sample / replicate identifier
+    CUSTOM = auto()         # domain-specific role, see AxisMeta.custom_role
 
 
 @dataclass
@@ -94,7 +94,6 @@ class Dataset:
     ) -> None:
         self._data = data
         self._axis_meta: dict[str, AxisMeta] = dict(axis_meta or {})
-
         #: Free-form bag for instrument metadata, file origin, acquisition
         #: settings, etc. Not interpreted by the core.
         self.metadata: dict[str, Any] = dict(metadata or {})
@@ -175,7 +174,6 @@ class Dataset:
     ) -> str | None:
         """Convenience wrapper: return the first axis with ``role``, or
         ``None`` if there is none."""
-
         axes = self.axes_with_role(role, custom_role=custom_role)
         return axes[0] if axes else None
 

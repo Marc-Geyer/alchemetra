@@ -46,7 +46,7 @@ class ParameterSpec:
     """
 
     name: str
-    kind: str  # "int" | "float" | "str" | "bool" | "choice" | "axis"
+    kind: str = "float"        # "float" | "int" | "str" | "bool" | "choice" | "axis"
     default: Any = None
     label: str | None = None
     choices: tuple[Any, ...] | None = None  # for kind == "choice"
@@ -143,3 +143,5 @@ class NodeBase(PluginBase):
         ``params_hash``; implementations only need to set ``dataset``
         (and optionally ``metadata``/label).
         """
+
+        raise NotImplementedError

@@ -21,9 +21,9 @@ from ...plugins.registry import register_plugin
 from ..context import UiContext
 from ..views.base import ViewPlugin
 
-# Use numpy/row-major (rows = y axis, columns = x axis) image
-# orientation throughout this module - matches how the (spectral,
-# temporal) array is built in create_widget.
+# Use numpy/row-major (rows = y axis, columns = x axis) image orientation
+# throughout this module - matches how the (spectral, temporal) array is
+# built in create_widget.
 pg.setConfigOptions(imageAxisOrder="row-major")
 
 

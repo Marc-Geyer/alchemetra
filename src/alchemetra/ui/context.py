@@ -1,12 +1,4 @@
-"""Shared context object passed to every panel and view plugin.
-
-Panels and views must not reach into :class:`MainWindow` internals or
-into each other directly - everything they need to read or react to
-goes through :class:`UiContext`. This is what keeps panel/view plugins
-decoupled from each other and from the main window implementation, so
-third-party plugins only need to depend on this module plus the core
-data model.
-"""
+"""Shared observable state for the running UI – the dependency boundary for plugins."""
 
 from __future__ import annotations
 
@@ -18,50 +10,26 @@ from ..services.annotation_service import AnnotationService
 
 
 class UiContext(QObject):
-    """Shared, observable state for the running application.
+    """Holds the current Project and forwards change signals.
 
-    Holds the current :class:`~alchemetra.project.project.Project` and
-    the :class:`~alchemetra.services.annotation_service.AnnotationService`
-    bound to it, plus Qt signals panels/views can connect to instead of
-    polling.
-
-    Panels/views that want to *cause* something to happen (open a view
-    for an artifact, select a node in the workflow editor, ...) call the
-    corresponding ``request_*`` method; :class:`MainWindow` connects to
-    these once at startup and performs the actual UI action. This keeps
-    the dependency direction one-way: plugins depend on
-    :class:`UiContext`, never on :class:`MainWindow`.
+    Panel and view plugins depend on this class only – never on MainWindow.
     """
 
-    #: Emitted whenever :attr:`project` is replaced (new/opened project).
     project_changed = Signal()
-
-    #: Emitted after :attr:`project`'s workflow graph or its derived data
-    #: changes (e.g. after a run). Panels showing workflow/result state
-    #: should refresh on this signal.
     workflow_changed = Signal()
-
-    #: Emitted by :class:`AnnotationService` callbacks, forwarded here so
-    #: panels/views only need one signal to connect to.
-    annotations_changed = Signal(object, str)  # (AnnotationBase, "added"|"removed")
-
-    #: Emitted when the user selects an artifact in some panel (e.g. the
-    #: project explorer). Views interested in "the currently selected
-    #: artifact" connect to this.
-    artifact_selected = Signal(str)  # artifact id
-
-    #: Emitted to ask the main window to open a view for an artifact.
-    view_requested = Signal(str)  # artifact id
+    annotations_changed = Signal(object, str)
+    artifact_selected = Signal(str)
+    view_requested = Signal(str)
+    node_selected = Signal(str)   # workflow node id
 
     def __init__(self, project: Project | None = None) -> None:
         super().__init__()
         self._project = project or Project()
         self._annotation_service = AnnotationService(self._project)
         self._annotation_service.on_change(
-            lambda annotation, kind: self.annotations_changed.emit(annotation, kind)
+            lambda ann, kind: self.annotations_changed.emit(ann, kind)
         )
 
-    # ------------------------------------------------------------------
     @property
     def project(self) -> Project:
         return self._project
@@ -71,13 +39,10 @@ class UiContext(QObject):
         return self._annotation_service
 
     def set_project(self, project: Project) -> None:
-        """Replace the current project (e.g. after opening a project
-        file) and notify everyone."""
-
         self._project = project
         self._annotation_service = AnnotationService(self._project)
         self._annotation_service.on_change(
-            lambda annotation, kind: self.annotations_changed.emit(annotation, kind)
+            lambda ann, kind: self.annotations_changed.emit(ann, kind)
         )
         self.project_changed.emit()
         self.workflow_changed.emit()
@@ -85,21 +50,22 @@ class UiContext(QObject):
     def artifact(self, artifact_id: str) -> Artifact | None:
         """Convenience lookup across raw and derived data."""
 
-        return self._project.raw_data.get(artifact_id) or self._project.derived_data.get(
-            artifact_id
-        )
+        for artifact in self._project.raw_data.values():
+            if artifact.id == artifact_id:
+                return artifact
+        return self._project.derived_data.get(artifact_id)
 
     def all_artifacts(self) -> dict[str, Artifact]:
-        artifacts: dict[str, Artifact] = {}
-        artifacts.update(self._project.raw_data)
+        """All artifacts keyed by artifact id."""
+        artifacts = {a.id: a for a in self._project.raw_data.values()}
         artifacts.update(self._project.derived_data)
         return artifacts
 
-    # ------------------------------------------------------------------
-    # Requests from panels/views to the main window
-    # ------------------------------------------------------------------
     def select_artifact(self, artifact_id: str) -> None:
         self.artifact_selected.emit(artifact_id)
+
+    def select_node(self, node_id: str) -> None:
+        self.node_selected.emit(node_id)
 
     def request_view(self, artifact_id: str) -> None:
         self.view_requested.emit(artifact_id)

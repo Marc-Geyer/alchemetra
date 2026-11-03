@@ -1,11 +1,11 @@
 """Example processing-node plugins.
 
-These exist to (a) give the execution engine and UI something to run
-out of the box and (b) serve as minimal, readable reference
-implementations for third-party plugin authors. They deliberately stay
-domain-agnostic: :class:`ScaleNode` works on any dataset that has a data
-variable named ``"intensity"``, regardless of which axis roles (Raman
-wavenumber, chromatography retention time, ...) are attached to it.
+These exist to (a) give the execution engine and UI something to run out
+of the box and (b) serve as minimal, readable reference implementations
+for third-party plugin authors. They deliberately stay domain-agnostic:
+:class:`ScaleNode` locates its intensity variable by
+:data:`~alchemetra.data.dataset.AxisRole`, regardless of which concrete
+dimension name (Raman shift, wavelength, retention time, ...) is in use.
 """
 
 from __future__ import annotations
@@ -13,14 +13,14 @@ from __future__ import annotations
 from typing import Any
 
 from ..data.artifact import Artifact
+from ..data.dataset import AxisRole
 from ..plugins.registry import register_plugin
 from ..workflow.node import NodeBase, ParameterSpec, PortSpec
 
 
 @register_plugin
 class ScaleNode(NodeBase):
-    """Multiply the ``intensity`` variable of the input dataset by a
-    constant factor.
+    """Multiply the intensity variable (found by role) by a constant factor.
 
     This is the simplest possible processing node: one input port, one
     output port, one numeric parameter. It demonstrates the expected
@@ -37,10 +37,10 @@ class ScaleNode(NodeBase):
 
     plugin_id = "core.example.scale"
     display_name = "Scale"
-    description = "Multiply the 'intensity' data variable by a constant factor."
+    description = "Multiply the intensity variable by a constant factor."
 
     input_ports = (
-        PortSpec(name="in", label="Input"),
+        PortSpec(name="in", label="Input", required_role=AxisRole.INTENSITY),
     )
     output_ports = (
         PortSpec(name="out", label="Output"),
@@ -60,8 +60,9 @@ class ScaleNode(NodeBase):
         artifact = inputs["in"]
         factor = params["factor"]
 
+        var = artifact.dataset.primary_axis(AxisRole.INTENSITY)
         scaled_xr = artifact.dataset.xr.copy()
-        scaled_xr["intensity"] = scaled_xr["intensity"] * factor
+        scaled_xr[var] = scaled_xr[var] * factor
 
         new_dataset = artifact.dataset.copy_with(scaled_xr)
         new_artifact = Artifact(dataset=new_dataset).labelled(

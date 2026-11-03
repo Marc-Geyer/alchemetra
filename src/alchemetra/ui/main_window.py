@@ -1,25 +1,14 @@
-"""The main application window.
-
-:class:`MainWindow` is intentionally thin: it owns a
-:class:`~alchemetra.ui.context.UiContext`, lays out dockable panels
-(discovered from :class:`~alchemetra.plugins.registry.PluginRegistry` via
-:class:`~alchemetra.ui.panels.base.PanelPlugin`), and a tabbed central
-area for artifact views (:class:`~alchemetra.ui.views.base.ViewPlugin`).
-It contains no domain logic - that all lives in the core
-(:mod:`alchemetra.project`, :mod:`alchemetra.workflow`, ...) and in
-panel/view plugins.
-
-Adding a new panel or view, including from a third-party plugin package,
-only requires registering a :class:`PanelPlugin`/:class:`ViewPlugin`
-subclass with :class:`PluginRegistry` *before* :class:`MainWindow` is
-constructed (or before :meth:`MainWindow.reload_panels` is called) -
-nothing here needs to change.
-"""
+"""MainWindow – thin shell hosting dockable panels and tabbed artifact views."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from typing import Callable
+
 from PySide6.QtWidgets import (
     QDockWidget,
+    QFileDialog,
     QMainWindow,
     QMessageBox,
     QTabWidget,
@@ -30,6 +19,8 @@ from ..data.artifact import Artifact
 from ..plugins.base import PluginKind
 from ..plugins.registry import PluginRegistry
 from ..project.project import Project
+from ..project.project_manager import ProjectManager
+from ..services.import_service import ImportService
 from .context import UiContext
 
 
@@ -37,7 +28,6 @@ class MainWindow(QMainWindow):
     def __init__(self, context: UiContext | None = None) -> None:
         super().__init__()
         self.context = context or UiContext()
-
         self.setWindowTitle("Alchemetra")
         self.resize(1280, 800)
 
@@ -47,117 +37,88 @@ class MainWindow(QMainWindow):
         self._tabs.tabCloseRequested.connect(self._close_tab)
         self.setCentralWidget(self._tabs)
 
-        #: artifact id -> widget currently showing it (one view per
-        #: artifact at a time; re-requesting just focuses the tab).
         self._open_views: dict[str, QWidget] = {}
-
         self._docks: dict[str, QDockWidget] = {}
 
         self._build_menus()
         self.reload_panels()
-
         self.context.view_requested.connect(self.open_view_for_artifact)
 
     # ------------------------------------------------------------------
-    # Menus
-    # ------------------------------------------------------------------
     def _build_menus(self) -> None:
-        menu_bar = self.menuBar()
-
-        file_menu = menu_bar.addMenu("&File")
+        mb = self.menuBar()
+        file_menu = mb.addMenu("&File")
         file_menu.addAction("&New Project", self.new_project)
+        file_menu.addAction("&Open Project\u2026", self.open_project_dialog)
+        file_menu.addAction("&Save Project As\u2026", self.save_project_dialog)
+        file_menu.addSeparator()
+        file_menu.addAction("&Import Data\u2026", self.import_data_dialog)
+        file_menu.addSeparator()
+        file_menu.addAction("Export Workflow &Template\u2026", self.export_template_dialog)
+        file_menu.addAction("Load Workflow T&emplate\u2026", self.load_template_dialog)
         file_menu.addSeparator()
         file_menu.addAction("&Run Workflow", self.run_workflow)
         file_menu.addSeparator()
         file_menu.addAction("&Quit", self.close)
+        self.view_menu = mb.addMenu("&View")
 
-        #: Populated by :meth:`reload_panels` with one "toggle visible"
-        #: action per dock widget.
-        self.view_menu = menu_bar.addMenu("&View")
-
-    # ------------------------------------------------------------------
-    # Panels
-    # ------------------------------------------------------------------
     def reload_panels(self) -> None:
-        """(Re)create one dock widget per registered
-        :class:`~alchemetra.ui.panels.base.PanelPlugin`.
+        """Discover and create dock widgets for all registered PanelPlugins.
 
-        Safe to call again after new panel plugins are registered at
-        runtime - existing docks for plugin ids that are already present
-        are left untouched.
+        Safe to call again at runtime after new panel plugins are registered –
+        existing panels are not duplicated.
         """
-
         from .builtin import register_all
-
         register_all()
 
         for plugin_cls in PluginRegistry.all(PluginKind.PANEL):
             if plugin_cls.plugin_id in self._docks:
                 continue
-
             plugin = plugin_cls()
             widget = plugin.create_widget(self.context)
-
             dock = QDockWidget(plugin.display_name, self)
             dock.setObjectName(plugin.plugin_id)
             dock.setWidget(widget)
             self.addDockWidget(plugin.default_area, dock)
             if not plugin.default_visible:
                 dock.hide()
-
             self.view_menu.addAction(dock.toggleViewAction())
             self._docks[plugin.plugin_id] = dock
 
     # ------------------------------------------------------------------
-    # Artifact views
-    # ------------------------------------------------------------------
     def open_view_for_artifact(self, artifact_id: str) -> None:
-        """Open (or focus) a view for the artifact with the given id.
-
-        The view plugin is chosen from every registered
-        :class:`~alchemetra.ui.views.base.ViewPlugin` whose
-        :meth:`~alchemetra.ui.views.base.ViewPlugin.supports` returns
-        ``True`` for this artifact, picking the highest
-        :attr:`~alchemetra.ui.views.base.ViewPlugin.priority`. If no
-        plugin supports the artifact, the user is informed - this is
-        expected for artifacts that aren't meant to be visualised
-        directly (e.g. pure metadata/results).
-        """
-
         artifact = self.context.artifact(artifact_id)
         if artifact is None:
             return
 
         existing = self._open_views.get(artifact_id)
         if existing is not None:
-            index = self._tabs.indexOf(existing)
-            if index != -1:
-                self._tabs.setCurrentIndex(index)
+            idx = self._tabs.indexOf(existing)
+            if idx != -1:
+                self._tabs.setCurrentIndex(idx)
                 return
-            # Tab was closed without going through _close_tab somehow.
             del self._open_views[artifact_id]
 
         plugin_cls = self._best_view_for(artifact)
         if plugin_cls is None:
             QMessageBox.information(
-                self,
-                "No view available",
-                f"No view plugin can currently display '{artifact.label}'.",
+                self, "No view available",
+                f"No view plugin can display '{artifact.label}'.",
             )
             return
 
         plugin = plugin_cls()
         widget = plugin.create_widget(artifact, self.context)
-        index = self._tabs.addTab(widget, f"{artifact.label} \u2013 {plugin.display_name}")
-        self._tabs.setCurrentIndex(index)
+        title = f"{artifact.label} – {plugin.display_name}"
+        idx = self._tabs.addTab(widget, title)
+        self._tabs.setCurrentIndex(idx)
         self._open_views[artifact_id] = widget
 
     @staticmethod
     def _best_view_for(artifact: Artifact):
         candidates = [
-            plugin_cls
-            for plugin_cls in PluginRegistry.all(PluginKind.VISUALIZATION)
-            if plugin_cls.supports(artifact)
+            p for p in PluginRegistry.all(PluginKind.VISUALIZATION)
+            if p.supports(artifact)
         ]
         if not candidates:
             return None
@@ -167,19 +128,79 @@ class MainWindow(QMainWindow):
     def _close_tab(self, index: int) -> None:
         widget = self._tabs.widget(index)
         self._tabs.removeTab(index)
-        for artifact_id, open_widget in list(self._open_views.items()):
-            if open_widget is widget:
-                del self._open_views[artifact_id]
+        for aid, w in list(self._open_views.items()):
+            if w is widget:
+                del self._open_views[aid]
         if widget is not None:
             widget.deleteLater()
 
     # ------------------------------------------------------------------
-    # Project actions
-    # ------------------------------------------------------------------
-    def new_project(self) -> None:
-        self.context.set_project(Project())
+    def _reset_views(self) -> None:
         self._tabs.clear()
         self._open_views.clear()
+
+    def new_project(self) -> None:
+        self.context.set_project(Project())
+        self._reset_views()
+
+    # -- path-based operations (raise on error; used by dialogs and tests) --
+    def save_project(self, path: str | Path) -> None:
+        ProjectManager.save(self.context.project, path)
+
+    def open_project(self, path: str | Path) -> None:
+        self.context.set_project(ProjectManager.load(path))
+        self._reset_views()
+
+    def import_file(self, path: str | Path, **options) -> None:
+        artifacts = ImportService.import_file(self.context.project, path, **options)
+        self.context.notify_workflow_changed()
+        if artifacts:
+            self.context.request_view(artifacts[0].id)
+
+    def export_template(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps(self.context.project.export_template(), indent=2))
+
+    def load_template(self, path: str | Path) -> None:
+        """Replace the workflow with a template; the project's current raw
+        data stays attached to the entry nodes with matching ids."""
+        self.context.project.import_template(json.loads(Path(path).read_text()))
+        self.context.notify_workflow_changed()
+
+    # -- dialog wrappers ------------------------------------------------
+    def _guard(self, title: str, action: Callable[[], None]) -> None:
+        try:
+            action()
+        except Exception as exc:  # noqa: BLE001 - surface to the user
+            QMessageBox.critical(self, title, str(exc))
+
+    def save_project_dialog(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Save project to folder")
+        if path:
+            self._guard("Saving failed", lambda: self.save_project(path))
+
+    def open_project_dialog(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Open project folder")
+        if path:
+            self._guard("Opening failed", lambda: self.open_project(path))
+
+    def import_data_dialog(self) -> None:
+        exts = " ".join(f"*{e}" for e in ImportService.supported_extensions())
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Import data", "", f"Data files ({exts});;All files (*)")
+        for path in paths:
+            self._guard("Import failed", lambda p=path: self.import_file(p))
+
+    def export_template_dialog(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export workflow template", "workflow.json", "Template (*.json)")
+        if path:
+            self._guard("Export failed", lambda: self.export_template(path))
+
+    def load_template_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load workflow template", "", "Template (*.json)")
+        if path:
+            self._guard("Loading template failed", lambda: self.load_template(path))
 
     def run_workflow(self) -> None:
         try:
